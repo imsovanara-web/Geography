@@ -271,12 +271,21 @@ else{
   mic.addEventListener("click",()=>{
     if(rec){ rec.stop(); return; }
     try{ rec=new SR(); }catch{ micBlocked(); return; }
-    rec.lang="en-US"; rec.interimResults=false; rec.maxAlternatives=5;
+    rec.lang="en-US"; rec.interimResults=true; rec.continuous=false; rec.maxAlternatives=5;
+    let done=false;
+    const clean=t=>t.replace(/^(show me|show|find|what about|tell me about)\s+/i,"").trim();
+    const exact=t=>{ const s=norm(clean(t)); const k=keys.find(k=>k.names.includes(s)); return k&&k.c; };
+    const finish=(c,t)=>{ done=true; pick(c.id); note(`You said "${t}".`); try{rec.stop()}catch{} };
     rec.onstart=()=>{mic.classList.add("on"); note("Listening… say a country name.");};
     rec.onresult=e=>{
-      const alts=[...e.results[0]].map(r=>r.transcript);
-      for(const t of alts){ const hit=search(t.replace(/^(show me|show|find|what about|tell me about)\s+/i,""),true)[0]; if(hit){ pick(hit.id); note(`You said "${t}".`); return; } }
-      note(`I heard "${alts[0]}" but couldn't match a country. Try again or type it.`);
+      if(done) return;
+      const r=e.results[e.results.length-1], alts=[...r].map(a=>a.transcript.trim()).filter(Boolean);
+      if(!alts.length) return;
+      // act as soon as the words match a country name exactly, without waiting for the pause at the end
+      for(const t of alts){ const c=exact(t); if(c) return finish(c,t); }
+      if(!r.isFinal){ note(`Heard "${alts[0]}"…`); return; }
+      for(const t of alts){ const hit=search(clean(t),true)[0]; if(hit) return finish(hit,t); }
+      done=true; note(`I heard "${alts[0]}" but couldn't match a country. Try again or type it.`);
     };
     rec.onerror=e=>{ if(e.error==="not-allowed"||e.error==="service-not-allowed"||e.error==="audio-capture"){ micBlocked(); return; } note(e.error==="no-speech" ? "I didn't hear anything. Tap Speak and try again." : "Voice search didn't work this time. Type the name instead."); };
     rec.onend=()=>{mic.classList.remove("on"); rec=null;};
@@ -285,10 +294,36 @@ else{
 }
 
 /* ---------- voice out (read aloud) ---------- */
-function say(text){
-  if(!("speechSynthesis" in window)) return false;
-  speechSynthesis.cancel(); const u=new SpeechSynthesisUtterance(text); u.lang="en-US"; u.rate=.95; speechSynthesis.speak(u); return true;
+let voice=null;
+function pickVoice(){
+  try{ const vs=speechSynthesis.getVoices(); voice=vs.find(v=>v.lang==="en-US"&&v.localService)||vs.find(v=>v.lang==="en-US")||vs.find(v=>/^en/i.test(v.lang))||null; }catch{}
 }
+if("speechSynthesis" in window){ pickVoice(); speechSynthesis.addEventListener?.("voiceschanged",pickVoice); }
+let sayTimer=null;
+function speakNow(text,onend){
+  // one utterance per sentence: long single utterances get cut off in some browsers
+  const parts=text.split(/(?<=[.!?])\s+/).map(x=>x.trim()).filter(Boolean);
+  parts.forEach((part,i)=>{
+    const u=new SpeechSynthesisUtterance(part); u.lang="en-US"; u.rate=.95; if(voice) u.voice=voice;
+    if(i===parts.length-1){ u.onend=onend; u.onerror=onend; }
+    speechSynthesis.speak(u);
+  });
+}
+function say(text,onend){
+  if(!("speechSynthesis" in window)) return false;
+  clearTimeout(sayTimer);
+  if(!voice) pickVoice();
+  if(speechSynthesis.speaking||speechSynthesis.pending){
+    speechSynthesis.cancel();
+    // Safari drops an utterance queued right after cancel(), so wait a moment
+    sayTimer=setTimeout(()=>speakNow(text,onend),120);
+  } else {
+    speechSynthesis.resume?.();
+    speakNow(text,onend);
+  }
+  return true;
+}
+function stopSpeaking(){ clearTimeout(sayTimer); try{speechSynthesis.cancel()}catch{} }
 
 /* ---------- mini world map ---------- */
 function mapSVG(c){
@@ -309,6 +344,7 @@ const latTxt = ([la,lo]) => `${Math.abs(la).toFixed(0)}°${la>=0?"N":"S"}, ${Mat
 /* ---------- country card ---------- */
 let current=null;
 function show(id){
+  stopSpeaking();
   const c=byId[id]; if(!c) return; current=id; store.set("wfe.last",id);
   const p=fmtPop(c.pop);
   const nbs=c.nb.map(b=>byId[b]).filter(Boolean);
@@ -347,9 +383,14 @@ function show(id){
   </div>
   <div class="where"><div class="fact" style="padding:0"><div class="l">Where in the world</div></div>${mapSVG(c)}</div>`;
   $("#card").querySelectorAll(".chip").forEach(b=>b.onclick=()=>pick(b.dataset.id));
-  $("#speak").onclick=()=>{
-    const t=`${c.n}. ${c.cap?`The capital is ${c.cap}.`:""} ${c.pop?`About ${p.v.replace("billion","billion").replace("million","million")} people live here.`:""} It is in ${c.sub||c.reg}. ${c.lang.length?`People speak ${c.lang.slice(0,3).join(", ")}.`:""} ${c.fact}`;
-    if(!say(t)) note("Read aloud isn't supported in this browser.");
+  const sp=$("#speak"), spLabel=sp.lastChild;
+  const resetSp=()=>{ spLabel.textContent="Read aloud"; sp.dataset.on=""; };
+  sp.onclick=()=>{
+    if(sp.dataset.on){ stopSpeaking(); resetSp(); return; }
+    const t=`${c.n}. ${c.cap?`The capital is ${c.cap}.`:""} ${c.pop?`About ${p.v} people live here.`:""} It is in ${c.sub||c.reg}. ${c.lang.length?`People speak ${c.lang.slice(0,3).join(", ")}.`:""} ${c.fact}`;
+    if(!say(t,resetSp)){ note("Read aloud isn't supported in this browser."); return; }
+    sp.dataset.on="1"; spLabel.textContent="Stop";
+    note("Reading aloud. No sound? Turn off silent mode and turn up the volume.");
   };
   $("#quizme").onclick=()=>{ qs.region=c.reg==="Antarctic"?"World":c.reg; setTab("quiz"); renderSetup(); };
   document.querySelectorAll(".tile").forEach(t=>t.classList.toggle("cur",t.dataset.id===id));
