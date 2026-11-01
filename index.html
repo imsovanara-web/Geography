@@ -294,36 +294,40 @@ else{
 }
 
 /* ---------- voice out (read aloud) ---------- */
-let voice=null;
-function pickVoice(){
-  try{ const vs=speechSynthesis.getVoices(); voice=vs.find(v=>v.lang==="en-US"&&v.localService)||vs.find(v=>v.lang==="en-US")||vs.find(v=>/^en/i.test(v.lang))||null; }catch{}
-}
-if("speechSynthesis" in window){ pickVoice(); speechSynthesis.addEventListener?.("voiceschanged",pickVoice); }
-let sayTimer=null;
+let sayTimer=null, sayWatch=null;
 function speakNow(text,onend){
   // one utterance per sentence: long single utterances get cut off in some browsers
   const parts=text.split(/(?<=[.!?])\s+/).map(x=>x.trim()).filter(Boolean);
+  let started=false;
   parts.forEach((part,i)=>{
-    const u=new SpeechSynthesisUtterance(part); u.lang="en-US"; u.rate=.95; if(voice) u.voice=voice;
-    if(i===parts.length-1){ u.onend=onend; u.onerror=onend; }
+    const u=new SpeechSynthesisUtterance(part); u.lang="en-US"; u.rate=.95; u.volume=1;
+    if(i===0){
+      u.onstart=()=>{ started=true; clearTimeout(sayWatch); note("Reading aloud… No sound? Turn off silent mode and turn up the volume."); };
+    }
+    u.onerror=e=>{ clearTimeout(sayWatch); if(e.error!=="interrupted"&&e.error!=="canceled") note(`Read aloud stopped (${e.error||"error"}). Reload the page and try again.`); onend&&onend(); };
+    if(i===parts.length-1) u.onend=()=>{ onend&&onend(); };
     speechSynthesis.speak(u);
   });
+  clearTimeout(sayWatch);
+  sayWatch=setTimeout(()=>{ if(!started){ note("Safari didn't start reading. If you used Speak first, reload the page and tap Read aloud again."); speechSynthesis.cancel(); onend&&onend(); } },2500);
 }
 function say(text,onend){
   if(!("speechSynthesis" in window)) return false;
   clearTimeout(sayTimer);
-  if(!voice) pickVoice();
   if(speechSynthesis.speaking||speechSynthesis.pending){
     speechSynthesis.cancel();
     // Safari drops an utterance queued right after cancel(), so wait a moment
-    sayTimer=setTimeout(()=>speakNow(text,onend),120);
+    sayTimer=setTimeout(()=>speakNow(text,onend),150);
   } else {
-    speechSynthesis.resume?.();
+    if(speechSynthesis.paused) speechSynthesis.resume();
     speakNow(text,onend);
   }
   return true;
 }
-function stopSpeaking(){ clearTimeout(sayTimer); try{speechSynthesis.cancel()}catch{} }
+function stopSpeaking(){
+  clearTimeout(sayTimer); clearTimeout(sayWatch);
+  try{ if(speechSynthesis.speaking||speechSynthesis.pending) speechSynthesis.cancel(); }catch{}
+}
 
 /* ---------- mini world map ---------- */
 function mapSVG(c){
@@ -390,7 +394,7 @@ function show(id){
     const t=`${c.n}. ${c.cap?`The capital is ${c.cap}.`:""} ${c.pop?`About ${p.v} people live here.`:""} It is in ${c.sub||c.reg}. ${c.lang.length?`People speak ${c.lang.slice(0,3).join(", ")}.`:""} ${c.fact}`;
     if(!say(t,resetSp)){ note("Read aloud isn't supported in this browser."); return; }
     sp.dataset.on="1"; spLabel.textContent="Stop";
-    note("Reading aloud. No sound? Turn off silent mode and turn up the volume.");
+    note("Starting to read…");
   };
   $("#quizme").onclick=()=>{ qs.region=c.reg==="Antarctic"?"World":c.reg; setTab("quiz"); renderSetup(); };
   document.querySelectorAll(".tile").forEach(t=>t.classList.toggle("cur",t.dataset.id===id));
