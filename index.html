@@ -267,30 +267,47 @@ const DICTATE="Voice is blocked here, so use your keyboard's mic instead: tap th
 function micBlocked(){ note(DICTATE); q.focus(); }
 if(!SR){ mic.onclick=micBlocked; }
 else{
-  let rec=null;
+  // Safari on iPhone does not always fire "end" after a result, so the button must never wait for it:
+  // every tap starts a fresh recognizer, and the old one is thrown away.
+  let rec=null, listening=false, limit=null, grace=null;
+  const clean=t=>t.replace(/^(show me|show|find|what about|tell me about)\s+/i,"").trim();
+  const exact=t=>{ const s=norm(clean(t)); const k=keys.find(k=>k.names.includes(s)); return k&&k.c; };
+  function endListen(){ listening=false; clearTimeout(limit); clearTimeout(grace); mic.classList.remove("on"); }
+  function drop(r){ if(!r) return; r.onresult=r.onerror=r.onend=r.onstart=null; try{ r.abort(); }catch{} }
   mic.addEventListener("click",()=>{
-    if(rec){ rec.stop(); return; }
-    try{ rec=new SR(); }catch{ micBlocked(); return; }
-    rec.lang="en-US"; rec.interimResults=false; rec.maxAlternatives=5;
-    let done=false;
-    const clean=t=>t.replace(/^(show me|show|find|what about|tell me about)\s+/i,"").trim();
-    const exact=t=>{ const s=norm(clean(t)); const k=keys.find(k=>k.names.includes(s)); return k&&k.c; };
-    const finish=(c,t)=>{ done=true; pick(c.id); note(`You said "${t}".`); try{rec.stop()}catch{} };
-    let limit=null;
-    rec.onstart=()=>{mic.classList.add("on"); note("Listening… say a country name."); limit=setTimeout(()=>{ try{rec&&rec.stop()}catch{} },8000);};
-    rec.onresult=e=>{
-      if(done) return;
-      const r=e.results[e.results.length-1], alts=[...r].map(a=>a.transcript.trim()).filter(Boolean);
+    if(listening){ try{ rec&&rec.stop(); }catch{} return; }
+    drop(rec); rec=null;
+    let r;
+    try{ r=new SR(); }catch{ micBlocked(); return; }
+    rec=r; let done=false;
+    r.lang="en-US"; r.interimResults=false; r.maxAlternatives=5;
+    const finish=(c,t)=>{ done=true; endListen(); pick(c.id); note(`You said "${t}".`); drop(r); if(rec===r) rec=null; };
+    r.onresult=e=>{
+      if(done||rec!==r) return;
+      const res=e.results[e.results.length-1]; if(!res) return;
+      const alts=[...res].map(a=>a.transcript.trim()).filter(Boolean);
       if(!alts.length) return;
-      // act as soon as the words match a country name exactly, without waiting for the pause at the end
       for(const t of alts){ const c=exact(t); if(c) return finish(c,t); }
-      if(!r.isFinal){ note(`Heard "${alts[0]}"…`); return; }
       for(const t of alts){ const hit=search(clean(t),true)[0]; if(hit) return finish(hit,t); }
-      done=true; note(`I heard "${alts[0]}" but couldn't match a country. Try again or type it.`);
+      done=true; endListen(); drop(r); if(rec===r) rec=null;
+      note(`I heard "${alts[0]}" but couldn't match a country. Tap Speak and try again.`);
     };
-    rec.onerror=e=>{ if(e.error==="not-allowed"||e.error==="service-not-allowed"||e.error==="audio-capture"){ micBlocked(); return; } note(e.error==="no-speech" ? "I didn't hear anything. Tap Speak and try again." : "Voice search didn't work this time. Type the name instead."); };
-    rec.onend=()=>{ clearTimeout(limit); mic.classList.remove("on"); rec=null; if(!done) note("I didn't catch a country name. Tap Speak and try again."); };
-    try{ rec.start(); }catch{ rec=null; micBlocked(); }
+    r.onerror=e=>{
+      if(rec!==r) return;
+      endListen(); drop(r); rec=null;
+      if(e.error==="not-allowed"||e.error==="service-not-allowed"||e.error==="audio-capture"){ micBlocked(); return; }
+      if(e.error==="aborted") return;
+      note(e.error==="no-speech" ? "I didn't hear anything. Tap Speak and try again." : "Voice search didn't work this time. Tap Speak and try again.");
+    };
+    r.onend=()=>{
+      if(rec!==r) return;
+      endListen(); rec=null;
+      if(!done) note("I didn't catch a country name. Tap Speak and try again.");
+    };
+    listening=true; mic.classList.add("on"); note("Listening… say a country name, then pause.");
+    // stop after 7 s; if Safari still gives nothing back, reset so the next tap works
+    limit=setTimeout(()=>{ try{ r.stop(); }catch{} grace=setTimeout(()=>{ if(rec===r&&!done){ endListen(); drop(r); rec=null; note("I didn't catch a country name. Tap Speak and try again."); } },2000); },7000);
+    try{ r.start(); }catch{ endListen(); drop(r); rec=null; note("Voice search couldn't start. Tap Speak again."); }
   });
 }
 
