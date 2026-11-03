@@ -271,7 +271,7 @@ else{
   mic.addEventListener("click",()=>{
     if(rec){ rec.stop(); return; }
     try{ rec=new SR(); }catch{ micBlocked(); return; }
-    rec.lang="en-US"; rec.interimResults=true; rec.continuous=false; rec.maxAlternatives=5;
+    rec.lang="en-US"; rec.interimResults=false; rec.maxAlternatives=5;
     let done=false;
     const clean=t=>t.replace(/^(show me|show|find|what about|tell me about)\s+/i,"").trim();
     const exact=t=>{ const s=norm(clean(t)); const k=keys.find(k=>k.names.includes(s)); return k&&k.c; };
@@ -295,59 +295,24 @@ else{
 }
 
 /* ---------- voice out (read aloud) ---------- */
-/* iPhones mute speech in silent mode. Playing a silent <audio> track switches Safari
-   to "media playback", which the silent switch does not mute, so the voice can be heard. */
-let silentAudio=null;
-function silentWavUrl(){
-  const rate=8000, n=rate/2, buf=new ArrayBuffer(44+n), v=new DataView(buf);
-  const w=(o,str)=>{for(let i=0;i<str.length;i++)v.setUint8(o+i,str.charCodeAt(i))};
-  w(0,"RIFF");v.setUint32(4,36+n,true);w(8,"WAVE");w(12,"fmt ");v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
-  v.setUint32(24,rate,true);v.setUint32(28,rate,true);v.setUint16(32,1,true);v.setUint16(34,8,true);w(36,"data");v.setUint32(40,n,true);
-  for(let i=0;i<n;i++)v.setUint8(44+i,128);
-  return URL.createObjectURL(new Blob([buf],{type:"audio/wav"}));
+/* Read aloud plays recorded MP3 clips (audio/<id>.mp3). Unlike the browser's speech voice,
+   an <audio> element keeps playing when an iPhone is on silent. */
+const player=new Audio(); player.preload="none"; player.setAttribute("playsinline","");
+let playerDone=null;
+function finishPlayer(){ const f=playerDone; playerDone=null; f&&f(); }
+player.addEventListener("ended",finishPlayer);
+player.addEventListener("error",()=>{ if(playerDone){ note("The recording didn't load. Check your internet connection and try again."); finishPlayer(); } });
+function playClip(name,onend){
+  stopSpeaking();
+  playerDone=onend||null;
+  player.src=`audio/${name}.mp3`;
+  const pr=player.play();
+  pr&&pr.catch(err=>{ if(err&&err.name==="AbortError") return; note("Tap Read aloud again to play the recording."); finishPlayer(); });
 }
-function audioOn(){
-  try{
-    if(!silentAudio){ silentAudio=new Audio(silentWavUrl()); silentAudio.loop=true; silentAudio.setAttribute("playsinline",""); silentAudio.setAttribute("x-webkit-airplay","deny"); }
-    const pr=silentAudio.play(); pr&&pr.catch(()=>{});
-  }catch{}
-}
-function audioOff(){ try{ silentAudio&&silentAudio.pause(); }catch{} }
-let sayTimer=null, sayWatch=null;
-function speakNow(text,onend){
-  // one utterance per sentence: long single utterances get cut off in some browsers
-  const parts=text.split(/(?<=[.!?])\s+/).map(x=>x.trim()).filter(Boolean);
-  let started=false;
-  parts.forEach((part,i)=>{
-    const u=new SpeechSynthesisUtterance(part); u.lang="en-US"; u.rate=.95; u.volume=1;
-    if(i===0){
-      u.onstart=()=>{ started=true; clearTimeout(sayWatch); note("Reading aloud… No sound? Turn up the volume."); };
-    }
-    u.onerror=e=>{ clearTimeout(sayWatch); if(e.error!=="interrupted"&&e.error!=="canceled") note(`Read aloud stopped (${e.error||"error"}). Reload the page and try again.`); onend&&onend(); };
-    if(i===parts.length-1) u.onend=()=>{ onend&&onend(); };
-    speechSynthesis.speak(u);
-  });
-  clearTimeout(sayWatch);
-  sayWatch=setTimeout(()=>{ if(!started){ note("Safari didn't start reading. If you used Speak first, reload the page and tap Read aloud again."); speechSynthesis.cancel(); onend&&onend(); } },2500);
-}
-function say(text,onend){
-  if(!("speechSynthesis" in window)) return false;
-  audioOn();
-  const done=onend; onend=()=>{ audioOff(); done&&done(); };
-  clearTimeout(sayTimer);
-  if(speechSynthesis.speaking||speechSynthesis.pending){
-    speechSynthesis.cancel();
-    // Safari drops an utterance queued right after cancel(), so wait a moment
-    sayTimer=setTimeout(()=>speakNow(text,onend),150);
-  } else {
-    if(speechSynthesis.paused) speechSynthesis.resume();
-    speakNow(text,onend);
-  }
-  return true;
-}
+function say(name){ playClip(name); return true; }
 function stopSpeaking(){
-  clearTimeout(sayTimer); clearTimeout(sayWatch); audioOff();
-  try{ if(speechSynthesis.speaking||speechSynthesis.pending) speechSynthesis.cancel(); }catch{}
+  try{ player.pause(); }catch{}
+  playerDone=null;
 }
 
 /* ---------- mini world map ---------- */
@@ -412,10 +377,9 @@ function show(id){
   const resetSp=()=>{ spLabel.textContent="Read aloud"; sp.dataset.on=""; };
   sp.onclick=()=>{
     if(sp.dataset.on){ stopSpeaking(); resetSp(); return; }
-    const t=`${c.n}. ${c.cap?`The capital is ${c.cap}.`:""} ${c.pop?`About ${p.v} people live here.`:""} It is in ${c.sub||c.reg}. ${c.lang.length?`People speak ${c.lang.slice(0,3).join(", ")}.`:""} ${c.fact}`;
-    if(!say(t,resetSp)){ note("Read aloud isn't supported in this browser."); return; }
+    playClip(c.id,resetSp);
     sp.dataset.on="1"; spLabel.textContent="Stop";
-    note("Starting to read…");
+    note("Reading aloud… No sound? Turn up the volume.");
   };
   $("#quizme").onclick=()=>{ qs.region=c.reg==="Antarctic"?"World":c.reg; setTab("quiz"); renderSetup(); };
   document.querySelectorAll(".tile").forEach(t=>t.classList.toggle("cur",t.dataset.id===id));
@@ -540,7 +504,7 @@ function finish(){
     <div class="row" style="justify-content:center"><button class="btn" id="rset">Change quiz</button><button class="btn primary" id="ragain">Play again</button></div>
   </div>`;
   $("#rset").onclick=renderSetup; $("#ragain").onclick=startQuiz;
-  if(stars===3) say("Perfect score! You're a flag champion.");
+  if(stars===3) say("perfect");
 }
 
 /* ---------- boot ---------- */
