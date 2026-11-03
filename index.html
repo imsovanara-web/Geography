@@ -276,7 +276,8 @@ else{
     const clean=t=>t.replace(/^(show me|show|find|what about|tell me about)\s+/i,"").trim();
     const exact=t=>{ const s=norm(clean(t)); const k=keys.find(k=>k.names.includes(s)); return k&&k.c; };
     const finish=(c,t)=>{ done=true; pick(c.id); note(`You said "${t}".`); try{rec.stop()}catch{} };
-    rec.onstart=()=>{mic.classList.add("on"); note("Listening… say a country name.");};
+    let limit=null;
+    rec.onstart=()=>{mic.classList.add("on"); note("Listening… say a country name."); limit=setTimeout(()=>{ try{rec&&rec.stop()}catch{} },8000);};
     rec.onresult=e=>{
       if(done) return;
       const r=e.results[e.results.length-1], alts=[...r].map(a=>a.transcript.trim()).filter(Boolean);
@@ -288,12 +289,30 @@ else{
       done=true; note(`I heard "${alts[0]}" but couldn't match a country. Try again or type it.`);
     };
     rec.onerror=e=>{ if(e.error==="not-allowed"||e.error==="service-not-allowed"||e.error==="audio-capture"){ micBlocked(); return; } note(e.error==="no-speech" ? "I didn't hear anything. Tap Speak and try again." : "Voice search didn't work this time. Type the name instead."); };
-    rec.onend=()=>{mic.classList.remove("on"); rec=null;};
+    rec.onend=()=>{ clearTimeout(limit); mic.classList.remove("on"); rec=null; if(!done) note("I didn't catch a country name. Tap Speak and try again."); };
     try{ rec.start(); }catch{ rec=null; micBlocked(); }
   });
 }
 
 /* ---------- voice out (read aloud) ---------- */
+/* iPhones mute speech in silent mode. Playing a silent <audio> track switches Safari
+   to "media playback", which the silent switch does not mute, so the voice can be heard. */
+let silentAudio=null;
+function silentWavUrl(){
+  const rate=8000, n=rate/2, buf=new ArrayBuffer(44+n), v=new DataView(buf);
+  const w=(o,str)=>{for(let i=0;i<str.length;i++)v.setUint8(o+i,str.charCodeAt(i))};
+  w(0,"RIFF");v.setUint32(4,36+n,true);w(8,"WAVE");w(12,"fmt ");v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);
+  v.setUint32(24,rate,true);v.setUint32(28,rate,true);v.setUint16(32,1,true);v.setUint16(34,8,true);w(36,"data");v.setUint32(40,n,true);
+  for(let i=0;i<n;i++)v.setUint8(44+i,128);
+  return URL.createObjectURL(new Blob([buf],{type:"audio/wav"}));
+}
+function audioOn(){
+  try{
+    if(!silentAudio){ silentAudio=new Audio(silentWavUrl()); silentAudio.loop=true; silentAudio.setAttribute("playsinline",""); silentAudio.setAttribute("x-webkit-airplay","deny"); }
+    const pr=silentAudio.play(); pr&&pr.catch(()=>{});
+  }catch{}
+}
+function audioOff(){ try{ silentAudio&&silentAudio.pause(); }catch{} }
 let sayTimer=null, sayWatch=null;
 function speakNow(text,onend){
   // one utterance per sentence: long single utterances get cut off in some browsers
@@ -302,7 +321,7 @@ function speakNow(text,onend){
   parts.forEach((part,i)=>{
     const u=new SpeechSynthesisUtterance(part); u.lang="en-US"; u.rate=.95; u.volume=1;
     if(i===0){
-      u.onstart=()=>{ started=true; clearTimeout(sayWatch); note("Reading aloud… No sound? Turn off silent mode and turn up the volume."); };
+      u.onstart=()=>{ started=true; clearTimeout(sayWatch); note("Reading aloud… No sound? Turn up the volume."); };
     }
     u.onerror=e=>{ clearTimeout(sayWatch); if(e.error!=="interrupted"&&e.error!=="canceled") note(`Read aloud stopped (${e.error||"error"}). Reload the page and try again.`); onend&&onend(); };
     if(i===parts.length-1) u.onend=()=>{ onend&&onend(); };
@@ -313,6 +332,8 @@ function speakNow(text,onend){
 }
 function say(text,onend){
   if(!("speechSynthesis" in window)) return false;
+  audioOn();
+  const done=onend; onend=()=>{ audioOff(); done&&done(); };
   clearTimeout(sayTimer);
   if(speechSynthesis.speaking||speechSynthesis.pending){
     speechSynthesis.cancel();
@@ -325,7 +346,7 @@ function say(text,onend){
   return true;
 }
 function stopSpeaking(){
-  clearTimeout(sayTimer); clearTimeout(sayWatch);
+  clearTimeout(sayTimer); clearTimeout(sayWatch); audioOff();
   try{ if(speechSynthesis.speaking||speechSynthesis.pending) speechSynthesis.cancel(); }catch{}
 }
 
