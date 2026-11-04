@@ -82,6 +82,9 @@ h2{font-family:var(--display);font-weight:800;font-size:1.25rem;margin:0;text-wr
 .bf .v{font-family:var(--display);font-weight:700;font-size:1.35rem;line-height:1.2;overflow-wrap:anywhere}
 .bf .s{font-size:.85rem;color:var(--muted)}
 .actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+.silent{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:.88rem;color:var(--muted);cursor:pointer}
+.silent input{width:18px;height:18px;accent-color:var(--ocean)}
+.vlog{color:var(--muted);font-size:.72rem;margin:2px 2px 0;min-height:1em;opacity:.8}
 .facts{border-top:1px solid var(--line);display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
 .fact{padding:14px 24px;border-bottom:1px solid var(--line);min-width:0}
 .fact .l{font-size:.78rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);font-weight:700;margin-bottom:2px}
@@ -177,6 +180,7 @@ footer{color:var(--muted);font-size:.85rem;padding-bottom:28px}
       <button class="btn primary" id="rand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>Surprise me</button>
     </div>
     <p class="note" id="note"></p>
+    <p class="vlog" id="vlog" aria-hidden="true"></p>
   </section>
 
   <section class="card" id="card" aria-live="polite"></section>
@@ -267,69 +271,147 @@ const DICTATE="Voice is blocked here, so use your keyboard's mic instead: tap th
 function micBlocked(){ note(DICTATE); q.focus(); }
 if(!SR){ mic.onclick=micBlocked; }
 else{
-  // Safari on iPhone does not always fire "end" after a result, so the button must never wait for it:
-  // every tap starts a fresh recognizer, and the old one is thrown away.
-  let rec=null, listening=false, limit=null, grace=null;
+  /* Speech recognition on iPhone Safari is fragile:
+     - "end" is often never fired, so state is reset as soon as a result arrives and by a timer;
+     - a recognizer that Safari still thinks is running refuses start(), so we fall back to a new one;
+     - final results can wait for a long pause, so we stop() as soon as Safari reports the speech ended. */
   const clean=t=>t.replace(/^(show me|show|find|what about|tell me about)\s+/i,"").trim();
   const exact=t=>{ const s=norm(clean(t)); const k=keys.find(k=>k.names.includes(s)); return k&&k.c; };
-  function endListen(){ listening=false; clearTimeout(limit); clearTimeout(grace); mic.classList.remove("on"); }
-  function drop(r){ if(!r) return; r.onresult=r.onerror=r.onend=r.onstart=null; try{ r.abort(); }catch{} }
-  mic.addEventListener("click",()=>{
-    if(listening){ try{ rec&&rec.stop(); }catch{} return; }
-    drop(rec); rec=null;
-    let r;
-    try{ r=new SR(); }catch{ micBlocked(); return; }
-    rec=r; let done=false;
-    r.lang="en-US"; r.interimResults=false; r.maxAlternatives=5;
-    const finish=(c,t)=>{ done=true; endListen(); pick(c.id); note(`You said "${t}".`); drop(r); if(rec===r) rec=null; };
+  const vlog=$("#vlog"); let trail=[];
+  const log=ev=>{ trail.push(ev); if(trail.length>8) trail.shift(); vlog.textContent="voice: "+trail.join(" › "); };
+  let rec=null, session=0, listening=false, done=false, timers=[];
+  const later=(fn,ms)=>timers.push(setTimeout(fn,ms));
+  function endListen(){ listening=false; timers.forEach(clearTimeout); timers=[]; mic.classList.remove("on"); }
+  function handle(alts){
+    for(const t of alts){ const c=exact(t); if(c) return [c,t]; }
+    for(const t of alts){ const hit=search(clean(t),true)[0]; if(hit) return [hit,t]; }
+    return null;
+  }
+  function wire(r){
+    r.lang="en-US"; r.interimResults=true; r.continuous=false; r.maxAlternatives=5;
+    r.onstart=()=>log("start");
+    r.onaudiostart=()=>log("mic on");
+    r.onspeechstart=()=>log("speech");
+    r.onspeechend=()=>{ log("speech end"); try{ r.stop(); }catch{} };
     r.onresult=e=>{
-      if(done||rec!==r) return;
+      if(r!==rec||done) return;
       const res=e.results[e.results.length-1]; if(!res) return;
-      const alts=[...res].map(a=>a.transcript.trim()).filter(Boolean);
-      if(!alts.length) return;
-      for(const t of alts){ const c=exact(t); if(c) return finish(c,t); }
-      for(const t of alts){ const hit=search(clean(t),true)[0]; if(hit) return finish(hit,t); }
-      done=true; endListen(); drop(r); if(rec===r) rec=null;
-      note(`I heard "${alts[0]}" but couldn't match a country. Tap Speak and try again.`);
+      const alts=[...res].map(a=>a.transcript.trim()).filter(Boolean); if(!alts.length) return;
+      log((res.isFinal?"heard ":"hearing ")+alts[0]);
+      const m=handle(res.isFinal?alts:alts.filter(t=>exact(t)));
+      if(m){ done=true; endListen(); pick(m[0].id); note(`You said "${m[1]}".`); try{ r.stop(); }catch{} return; }
+      if(res.isFinal){ done=true; endListen(); note(`I heard "${alts[0]}" but couldn't match a country. Tap Speak and try again.`); }
+      else note(`Heard "${alts[0]}"…`);
     };
     r.onerror=e=>{
-      if(rec!==r) return;
-      endListen(); drop(r); rec=null;
-      if(e.error==="not-allowed"||e.error==="service-not-allowed"||e.error==="audio-capture"){ micBlocked(); return; }
-      if(e.error==="aborted") return;
+      log("error "+e.error);
+      if(r!==rec) return;
+      if(e.error==="not-allowed"||e.error==="service-not-allowed"||e.error==="audio-capture"){ endListen(); micBlocked(); return; }
+      if(e.error==="aborted"||done) return;
+      done=true; endListen();
       note(e.error==="no-speech" ? "I didn't hear anything. Tap Speak and try again." : "Voice search didn't work this time. Tap Speak and try again.");
     };
     r.onend=()=>{
-      if(rec!==r) return;
-      endListen(); rec=null;
-      if(!done) note("I didn't catch a country name. Tap Speak and try again.");
+      log("end");
+      if(r!==rec) return;
+      if(listening&&!done){ done=true; endListen(); note("I didn't catch a country name. Tap Speak and try again."); }
     };
-    listening=true; mic.classList.add("on"); note("Listening… say a country name, then pause.");
-    // stop after 7 s; if Safari still gives nothing back, reset so the next tap works
-    limit=setTimeout(()=>{ try{ r.stop(); }catch{} grace=setTimeout(()=>{ if(rec===r&&!done){ endListen(); drop(r); rec=null; note("I didn't catch a country name. Tap Speak and try again."); } },2000); },7000);
-    try{ r.start(); }catch{ endListen(); drop(r); rec=null; note("Voice search couldn't start. Tap Speak again."); }
+  }
+  function fresh(){ const r=new SR(); wire(r); return r; }
+  mic.addEventListener("click",()=>{
+    if(listening){ log("tap stop"); try{ rec&&rec.stop(); }catch{} return; }
+    trail=[]; session++; done=false;
+    try{ if(!rec) rec=fresh(); }catch{ micBlocked(); return; }
+    let started=false;
+    try{ rec.start(); started=true; log("tap start"); }
+    catch(err){
+      // Safari still thinks the old recognizer is busy: drop it and use a new one
+      log("busy, new");
+      const old=rec; rec=null; try{ old.onend=old.onerror=old.onresult=null; old.abort(); }catch{}
+      try{ rec=fresh(); rec.start(); started=true; }catch{ rec=null; }
+    }
+    if(!started){ note("Voice search couldn't start. Tap Speak again."); return; }
+    listening=true; mic.classList.add("on"); note("Listening… say a country name.");
+    const mine=session;
+    later(()=>{ if(mine===session&&listening&&!done){ log("timeout"); try{ rec.stop(); }catch{} } },7000);
+    later(()=>{ if(mine===session&&listening&&!done){
+      log("reset"); done=true; endListen();
+      const old=rec; rec=null; try{ old.onend=old.onerror=old.onresult=null; old.abort(); }catch{}
+      note("I didn't catch a country name. Tap Speak and try again.");
+    } },9500);
   });
 }
 
 /* ---------- voice out (read aloud) ---------- */
-/* Read aloud plays recorded MP3 clips (audio/<id>.mp3). Unlike the browser's speech voice,
-   an <audio> element keeps playing when an iPhone is on silent. */
+/* Read aloud has two voices:
+   - natural: the device's own best English voice (clear, but muted when an iPhone is on silent)
+   - recorded: MP3 clips in audio/<id>.mp3, which keep playing on silent but sound robotic */
+let useRecorded=store.get("wfe.silentVoice",false);
 const player=new Audio(); player.preload="none"; player.setAttribute("playsinline","");
 let playerDone=null;
 function finishPlayer(){ const f=playerDone; playerDone=null; f&&f(); }
 player.addEventListener("ended",finishPlayer);
 player.addEventListener("error",()=>{ if(playerDone){ note("The recording didn't load. Check your internet connection and try again."); finishPlayer(); } });
 function playClip(name,onend){
-  stopSpeaking();
   playerDone=onend||null;
   player.src=`audio/${name}.mp3`;
   const pr=player.play();
   pr&&pr.catch(err=>{ if(err&&err.name==="AbortError") return; note("Tap Read aloud again to play the recording."); finishPlayer(); });
 }
-function say(name){ playClip(name); return true; }
+const hasTTS="speechSynthesis" in window;
+let bestVoice=null;
+function chooseVoice(){
+  if(!hasTTS) return;
+  let vs=[]; try{ vs=speechSynthesis.getVoices()||[]; }catch{}
+  const en=vs.filter(v=>/^en[-_]/i.test(v.lang)||v.lang==="en");
+  const score=v=>{
+    const n=v.name; let sc=0;
+    if(/premium/i.test(n)) sc+=60; else if(/enhanced/i.test(n)) sc+=50;
+    if(/^(Samantha|Ava|Allison|Susan|Zoe|Evan|Nathan|Tom)\b/i.test(n)) sc+=30;
+    if(/Google US English|Microsoft (Aria|Jenny|Guy)/i.test(n)) sc+=35;
+    if(/en[-_]US/i.test(v.lang)) sc+=10; else if(/en[-_](GB|AU|IE|CA)/i.test(v.lang)) sc+=5;
+    if(v.localService) sc+=2;
+    if(/Albert|Bad News|Bahh|Bells|Boing|Bubbles|Cellos|Good News|Jester|Organ|Superstar|Trinoids|Whisper|Wobble|Zarvox|Fred|Junior|Ralph|Kathy|Grandma|Grandpa|Eddy|Flo|Reed|Rocko|Sandy|Shelley/i.test(n)) sc-=100;
+    return sc;
+  };
+  en.sort((a,b)=>score(b)-score(a));
+  bestVoice=en[0]||null;
+}
+if(hasTTS){ chooseVoice(); try{ speechSynthesis.addEventListener("voiceschanged",chooseVoice); }catch{ speechSynthesis.onvoiceschanged=chooseVoice; } }
+let sayTimer=null, sayWatch=null;
+function speakNatural(text,onend){
+  if(!bestVoice) chooseVoice();
+  const parts=text.split(/(?<=[.!?])\s+/).map(x=>x.trim()).filter(Boolean);
+  let started=false;
+  parts.forEach((part,i)=>{
+    const u=new SpeechSynthesisUtterance(part);
+    if(bestVoice){ u.voice=bestVoice; u.lang=bestVoice.lang; } else u.lang="en-US";
+    u.rate=.9; u.pitch=1; u.volume=1;
+    u.onstart=()=>{ if(!started){ started=true; clearTimeout(sayWatch); } };
+    u.onerror=e=>{ clearTimeout(sayWatch); if(e.error!=="interrupted"&&e.error!=="canceled"){ note("Read aloud stopped. Tap it again."); onend&&onend(); } };
+    if(i===parts.length-1) u.onend=()=>{ onend&&onend(); };
+    speechSynthesis.speak(u);
+  });
+  clearTimeout(sayWatch);
+  sayWatch=setTimeout(()=>{ if(!started){ try{speechSynthesis.cancel()}catch{} note("No sound? Your iPhone may be on silent. Turn on \u201cPlay on silent mode\u201d below and tap Read aloud again."); onend&&onend(); } },3000);
+}
+function readAloud(c,text,onend){
+  stopSpeaking();
+  if(useRecorded||!hasTTS){ playClip(c,onend); return; }
+  if(speechSynthesis.speaking||speechSynthesis.pending){
+    try{speechSynthesis.cancel()}catch{}
+    sayTimer=setTimeout(()=>speakNatural(text,onend),150);   // Safari drops speech queued right after cancel()
+  } else {
+    if(speechSynthesis.paused) try{speechSynthesis.resume()}catch{}
+    speakNatural(text,onend);
+  }
+}
+function say(name,text){ readAloud(name,text||"",null); return true; }
 function stopSpeaking(){
+  clearTimeout(sayTimer); clearTimeout(sayWatch);
   try{ player.pause(); }catch{}
   playerDone=null;
+  try{ if(hasTTS&&(speechSynthesis.speaking||speechSynthesis.pending)) speechSynthesis.cancel(); }catch{}
 }
 
 /* ---------- mini world map ---------- */
@@ -373,6 +455,7 @@ function show(id){
         <button class="btn" id="speak"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/></svg>Read aloud</button>
         <button class="btn" id="quizme">Quiz me on ${esc(c.reg==="Antarctic"?"the world":c.reg)}</button>
       </div>
+      <label class="silent"><input type="checkbox" id="silentvoice"> Play on silent mode (uses a simpler, more robotic voice)</label>
     </div>
   </div>
   ${c.fact?`<div class="funfact"><span class="badge">Fun fact</span><p>${esc(c.fact)}</p></div>`:""}
@@ -394,10 +477,12 @@ function show(id){
   const resetSp=()=>{ spLabel.textContent="Read aloud"; sp.dataset.on=""; };
   sp.onclick=()=>{
     if(sp.dataset.on){ stopSpeaking(); resetSp(); return; }
-    playClip(c.id,resetSp);
-    sp.dataset.on="1"; spLabel.textContent="Stop";
-    note("Reading aloud… No sound? Turn up the volume.");
+    const t=`${c.n}. ${c.cap?`The capital is ${c.cap}.`:""} ${c.pop?`About ${p.v} people live here.`:""} It is in ${c.sub||c.reg}. ${c.lang.length?`People speak ${c.lang.slice(0,3).join(", ")}.`:""} ${c.fact}`;
+    sp.dataset.on="1"; spLabel.textContent="Stop"; note("");
+    readAloud(c.id,t,resetSp);
   };
+  const sil=$("#silentvoice"); sil.checked=useRecorded;
+  sil.onchange=()=>{ useRecorded=sil.checked; store.set("wfe.silentVoice",useRecorded); stopSpeaking(); resetSp(); };
   $("#quizme").onclick=()=>{ qs.region=c.reg==="Antarctic"?"World":c.reg; setTab("quiz"); renderSetup(); };
   document.querySelectorAll(".tile").forEach(t=>t.classList.toggle("cur",t.dataset.id===id));
 }
@@ -521,7 +606,7 @@ function finish(){
     <div class="row" style="justify-content:center"><button class="btn" id="rset">Change quiz</button><button class="btn primary" id="ragain">Play again</button></div>
   </div>`;
   $("#rset").onclick=renderSetup; $("#ragain").onclick=startQuiz;
-  if(stars===3) say("perfect");
+  if(stars===3) say("perfect","Perfect score! You're a flag champion.");
 }
 
 /* ---------- boot ---------- */
